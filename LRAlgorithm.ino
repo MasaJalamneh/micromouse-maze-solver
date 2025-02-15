@@ -67,6 +67,13 @@ void IRAM_ATTR EncoderISR() {
 // Flags
 bool goalReached = false;
 
+const float KP = 0.3; 
+const float KI = 0.01; 
+const float KD = 0.05; 
+float integral;
+float derivative;
+float lastError;
+
 void setup() {
     Serial.begin(115200);
     Wire.begin();
@@ -136,6 +143,28 @@ float getYawChange() {
     float adjustedGz = (gz - gyroZOffset) / 131.0;
     return adjustedGz * dt;
 }
+
+
+void fixAngle() {
+int targetYaw = yaw;
+int16_t gx, gy, gz;
+mpu.getRotation(&gx, &gy, &gz);
+int currentYaw = gz; 
+float error = targetYaw - currentYaw;
+integral += error; // Accumulate error over time
+derivative = error - lastError; // Rate of change of error
+lastError = error;
+
+int correction = KP * error + KI * integral + KD * derivative;
+digitalWrite(input1Pin, HIGH);
+digitalWrite(input2Pin, LOW);
+digitalWrite(input3Pin, LOW);
+digitalWrite(input4Pin, HIGH);
+
+analogWrite(enablePin, constrain(motorSpeed - correction, 0, 255)); // Adjust left motor
+analogWrite(enable2Pin, constrain(motorSpeed + correction, 0, 255)); // Adjust right motor
+}
+
 
 void rotate90(bool left) {
     Serial.println(left ? "Turning LEFT..." : "Turning RIGHT...");
@@ -220,6 +249,7 @@ void moveForward20cm() {
         (posX == goalX4 && posY == goalY4)) {
         Serial.println("🎯 Goal Reached!");
         goalReached = true;
+        stopMotors();
         return;
     }
 
@@ -230,51 +260,48 @@ void moveForward20cm() {
 // Main Movement Logic
 void moveRobot() {
     stopMotors();
-    // Read LiDAR distance
-    int lidarDistance = lidar.readRangeContinuousMillimeters();
-
-    Serial.print("LiDAR Distance: "); 
-    Serial.println(lidarDistance);
-
+    
     // Read IR sensor values
-    int irLeftValue = analogRead(irLeftPin);
+    int irLeftValue = digitalRead(irLeftPin);
     Serial.print("Left IR Distance: "); 
     Serial.println(irLeftValue);
 
-    int irRightValue = analogRead(irRightPin);
+    int irRightValue = digitalRead(irRightPin);
     Serial.print("Right IR Distance: "); 
     Serial.println(irRightValue);
+    
+    // Read LiDAR distance
+    int lidarDistance = lidar.readRangeContinuousMillimeters();
+    
+    Serial.print("LiDAR Distance: "); 
+    Serial.println(lidarDistance);
 
     // If an obstacle is detected by LiDAR
-    if (lidarDistance < lidarThreshold) {  
         stopMotors();
         delay(100);  // Small delay before rechecking sensor values
+        Serial.print("Front Wall Detected !!"); 
 
-        Serial.print("Front Wall Detected !! "); 
-
-        // Re-read IR values
-        irLeftValue = analogRead(irLeftPin);  
+        irLeftValue = digitalRead(irLeftPin);  // Re-read IR values
         Serial.print("Left IR Distance: "); 
         Serial.println(irLeftValue);
-
-        irRightValue = analogRead(irRightPin);
+        irRightValue = digitalRead(irRightPin);
         Serial.print("Right IR Distance: "); 
         Serial.println(irRightValue);
 
         if (useLeftHand) {
             Serial.print("Left Hand Rule ..."); 
             // Left-Hand Rule Logic
-            if (irLeftValue > irThreshold) {  
-                rotate90(true);  // Turn Left (no wall on left)
+            if (digitalRead(irLeftPin) == HIGH && digitalRead(irRightPin) == LOW) {  
+                rotate90(true);  // Turn Left
                 Serial.print("Turning Left ..."); 
             } else if (lidar.readRangeContinuousMillimeters() >= lidarThreshold) {  
-                moveForward20cm();  // Move Forward (no front obstacle)
+                moveForward20cm();  // Move Forward
                 Serial.print("Moving Forward ..."); 
-            } else if (irLeftValue <= irThreshold && irRightValue > irThreshold) {
-                rotate90(false);  // Turn Right (wall on left, no wall on right)
+            } else if (digitalRead(irLeftPin) == LOW && digitalRead(irRightPin) == HIGH) {
+                rotate90(false);  // Turn Right
                 Serial.print("Turning Right ...");   
-            } else if (irLeftValue > irThreshold && irRightValue > irThreshold) {  
-                rotate90(true);  // Turn Left (both sides open)
+            } else if (digitalRead(irLeftPin) == HIGH && digitalRead(irRightPin) == HIGH) {  
+                rotate90(true);  // Turn Left (if both IR sensors see nothing)
                 Serial.print("Turning Left ...");   
             } else {  
                 rotate90(true);  // Turn Left (no IR signals)
@@ -283,19 +310,19 @@ void moveRobot() {
                 useLeftHand = false;  // Switch to Right-Hand Rule
             }
         } else {
-            Serial.print("Right Hand Rule ..."); 
             // Right-Hand Rule Logic
-            if (irRightValue > irThreshold) {  
-                rotate90(false);  // Turn Right (no wall on right)
+            Serial.print("ٌRight Hand Rule ..."); 
+            if (digitalRead(irLeftPin) == LOW && digitalRead(irRightPin) == HIGH) {  
+                rotate90(false);  // Turn Right
                 Serial.print("Turning Right ...");   
             } else if (lidar.readRangeContinuousMillimeters() >= lidarThreshold) {  
-                moveForward20cm();  // Move Forward (no front obstacle)
+                moveForward20cm();  // Move Forward
                 Serial.print("Moving Forward ...");   
-            } else if (irRightValue <= irThreshold && irLeftValue > irThreshold) {  
-                rotate90(true);  // Turn Left (wall on right, no wall on left)
+            } else if (digitalRead(irLeftPin) == HIGH && digitalRead(irRightPin) == LOW) {  
+                rotate90(true);  // Turn Left
                 Serial.print("Turning Left ...");   
-            } else if (irLeftValue > irThreshold && irRightValue > irThreshold) {  
-                rotate90(false);  // Turn Right (both sides open)
+            } else if (digitalRead(irLeftPin) == HIGH && digitalRead(irRightPin) == HIGH) {  
+                rotate90(false);  // Turn Right (if both IR sensors see nothing)
                 Serial.print("Turning Right ...");   
             } else {
                 rotate90(true);  // Turn Right (no IR signals)
@@ -304,14 +331,13 @@ void moveRobot() {
                 useLeftHand = true;  // Switch back to Left-Hand Rule
             }
         }
-    } else {
+    
         // Move forward if no obstacles detected
         moveForward20cm();
-    }
+    
 
     delay(100);  // Small delay before the next cycle
 }
-
 void followSavedPath() {
     if (path.empty()) {
         Serial.println("Path completed!");
@@ -334,6 +360,25 @@ void printPath() {
     }
     Serial.println("Goal!");
 }
+
+void printMaze() {
+    Serial.println("Maze State:");
+    for (int i = 0; i < GRID_SIZE; i++) {
+        for (int j = 0; j < GRID_SIZE; j++) {
+            if (cost[i][j] == 255) {
+                Serial.print(" X "); // Wall
+            } else if (i == posX && j == posY) {
+                Serial.print(" R "); // Robot's position
+            } else {
+                Serial.printf("%2d ", cost[i][j]); // Cell cost
+            }
+        }
+        Serial.println();
+    }
+    Serial.println();
+}
+
+
 void loop() {
     if (!goalReached) {
         moveRobot();  
